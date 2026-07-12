@@ -21,9 +21,11 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-openai = ["openai>=1.30"]
+openai = ["openai>=1.30"]          # also covers OpenRouter (OpenAI-compatible)
 anthropic = ["anthropic>=0.30"]
-dev = ["pytest>=8", "httpx>=0.27", "openai>=1.30", "anthropic>=0.30"]
+gemini = ["google-genai>=1.0"]
+dev = ["pytest>=8", "httpx>=0.27", "openai>=1.30", "anthropic>=0.30",
+       "google-genai>=1.0"]
 
 [project.scripts]
 blackbox = "agent_blackbox.cli:main"

@@ -117,14 +117,20 @@ class BlackBox:
         """
         module = type(client).__module__ or ""
         if module.startswith("openai"):
+            # Also covers OpenRouter and any other OpenAI-compatible endpoint
+            # (the adapter labels the provider from the client's base_url).
             from .integrations.openai import instrument_openai
             return instrument_openai(client, self)
         if module.startswith("anthropic"):
             from .integrations.anthropic import instrument_anthropic
             return instrument_anthropic(client, self)
+        if module.startswith("google.genai"):
+            from .integrations.gemini import instrument_gemini
+            return instrument_gemini(client, self)
         raise TypeError(
-            f"Don't know how to watch {type(client)!r}. Supported: openai.OpenAI, "
-            "anthropic.Anthropic (sync clients). For other frameworks record "
+            f"Don't know how to watch {type(client)!r}. Supported: openai.OpenAI "
+            "(incl. OpenRouter via base_url), anthropic.Anthropic, and "
+            "google.genai.Client (sync clients). For other frameworks record "
             "manually via the FlightRecorder API."
         )
 

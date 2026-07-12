@@ -8,18 +8,20 @@ Everything the agent does lands in the recording automatically:
 Plus the manual context events you choose to add (user_input, retrieval,
 decision, final_output).
 
-Run:  ANTHROPIC_API_KEY=... python examples/anthropic_support_agent.py
+API key comes from the environment: ANTHROPIC_API_KEY (shell export or .env).
+
+Run:  python examples/anthropic_support_agent.py
 Then: blackbox list && blackbox report <session> && blackbox serve
 """
 
 import json
 
-import anthropic
-
 from agent_blackbox import BlackBox
+from agent_blackbox.clients import load_env_file, make_client
 
+load_env_file()                            # reads .env if present; env vars win
 bb = BlackBox("recordings", redact=True)   # redact=True scrubs emails/keys/cards
-client = bb.watch(anthropic.Anthropic())   # every messages.create is now recorded
+client = bb.watch(make_client("anthropic"))  # every messages.create recorded
 
 MODEL = "claude-opus-4-8"
 

@@ -18,6 +18,8 @@ from .context import BlackBox
 
 
 def run_demo(bb: BlackBox, session_id: str = "INC-DEMO-0001") -> str:
+    # The demo reuses a fixed session id — replace any previous demo recording.
+    bb.store.delete(session_id)
     with bb.session(session_id=session_id, pilot="support-agent-v2.3",
                     metadata={"company": "DemoShop", "environment": "demo"}) as rec:
         rec.user_input(

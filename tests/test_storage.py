@@ -74,3 +74,41 @@ def test_blackbox_with_sqlite(tmp_path):
     ok, _ = bb.verify("gamma")
     assert ok
     assert bb.list_sessions()[0].session_id == "gamma"
+
+
+def test_duplicate_session_id_refused(tmp_path):
+    import pytest as _pytest
+
+    for store in (JsonlStore(str(tmp_path / "j2")), SqliteStore(str(tmp_path / "s2.db"))):
+        r = FlightRecorder(session_id="dup", store=store)
+        r.user_input("first")
+        r.close()
+        with _pytest.raises(FileExistsError, match="unique"):
+            FlightRecorder(session_id="dup", store=store)
+        # original recording still intact
+        ok, _ = store.verify("dup")
+        assert ok
+
+
+def test_delete_session(tmp_path):
+    for store in (JsonlStore(str(tmp_path / "j3")), SqliteStore(str(tmp_path / "s3.db"))):
+        r = FlightRecorder(session_id="gone", store=store)
+        r.close()
+        assert store.delete("gone") is True
+        assert store.delete("gone") is False
+        # id is reusable after deletion
+        r2 = FlightRecorder(session_id="gone", store=store)
+        r2.close()
+        ok, _ = store.verify("gone")
+        assert ok
+
+
+def test_demo_rerun_stays_valid(tmp_path):
+    from agent_blackbox.demo import run_demo
+
+    bb = BlackBox(directory=str(tmp_path / "demo"))
+    run_demo(bb)
+    run_demo(bb)  # second run must replace, not append
+    ok, msg = bb.verify("INC-DEMO-0001")
+    assert ok, msg
+    assert len(bb.load("INC-DEMO-0001")) == 10

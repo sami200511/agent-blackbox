@@ -64,11 +64,27 @@ class JsonlStore:
 
     def append(self, event: dict) -> None:
         path = self.path_for(event["session_id"])
+        # A new session (seq 1) must never land in an existing recording:
+        # two chains in one file would look like tampering later.
+        if event["seq"] == 1 and os.path.exists(path) and os.path.getsize(path) > 0:
+            raise FileExistsError(
+                f"Session {event['session_id']!r} already has a recording at "
+                f"{path}. Session ids must be unique — pick a new session_id "
+                f"or delete the old recording first."
+            )
         line = json.dumps(event, ensure_ascii=False) + "\n"
         with self._lock, open(path, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
+
+    def delete(self, session_id: str) -> bool:
+        """Delete a recording. Returns True if one existed."""
+        path = self.path_for(session_id)
+        if os.path.exists(path):
+            os.remove(path)
+            return True
+        return False
 
     def load(self, session_id: str) -> list[dict]:
         path = self.path_for(session_id)
@@ -138,14 +154,29 @@ class SqliteStore:
     def append(self, event: dict) -> None:
         with self._lock:
             conn = self._conn()
-            conn.execute(
-                "INSERT INTO events (session_id, seq, type, ts, event_json) VALUES (?,?,?,?,?)",
-                (
-                    event["session_id"], event["seq"], event["type"], event["ts"],
-                    json.dumps(event, ensure_ascii=False),
-                ),
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO events (session_id, seq, type, ts, event_json) VALUES (?,?,?,?,?)",
+                    (
+                        event["session_id"], event["seq"], event["type"], event["ts"],
+                        json.dumps(event, ensure_ascii=False),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise FileExistsError(
+                    f"Session {event['session_id']!r} already has event seq "
+                    f"{event['seq']} in {self.db_path}. Session ids must be "
+                    f"unique — pick a new session_id or delete the old recording."
+                ) from exc
             conn.commit()
+
+    def delete(self, session_id: str) -> bool:
+        """Delete a session's events. Returns True if any existed."""
+        with self._lock:
+            conn = self._conn()
+            cur = conn.execute("DELETE FROM events WHERE session_id=?", (session_id,))
+            conn.commit()
+            return cur.rowcount > 0
 
     def load(self, session_id: str) -> list[dict]:
         rows = self._conn().execute(

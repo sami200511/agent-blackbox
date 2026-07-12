@@ -85,13 +85,14 @@ def _parse_completion(response: Any) -> dict:
 class _RecordingStream:
     """Wraps an OpenAI streaming response; records once fully consumed/closed."""
 
-    def __init__(self, inner, rec, model, prompt, params, t0):
+    def __init__(self, inner, rec, model, prompt, params, t0, provider="openai"):
         self._inner = inner
         self._rec = rec
         self._model = model
         self._prompt = prompt
         self._params = params
         self._t0 = t0
+        self._provider = provider
         self._text: list[str] = []
         self._tool_calls: dict[int, dict] = {}
         self._finish = None
@@ -155,7 +156,7 @@ class _RecordingStream:
             model=self._model,
             prompt=self._prompt,
             response="".join(self._text),
-            provider="openai",
+            provider=self._provider,
             params=self._params,
             usage=self._usage,
             tool_calls=[self._tool_calls[i] for i in sorted(self._tool_calls)],
@@ -168,12 +169,27 @@ class _RecordingStream:
         return getattr(self._inner, item)
 
 
+def _provider_label(client: Any) -> str:
+    """Label recordings by the actual endpoint, not just the SDK.
+
+    The OpenAI SDK is also the client for OpenAI-compatible providers
+    (OpenRouter, local servers, ...); the base_url tells them apart.
+    """
+    base = str(getattr(client, "base_url", "") or "")
+    if "openrouter" in base:
+        return "openrouter"
+    if base and "api.openai.com" not in base:
+        return f"openai-compatible ({base})"
+    return "openai"
+
+
 def instrument_openai(client: Any, blackbox) -> Any:
     """Patch `client.chat.completions.create` on this client instance."""
     completions = client.chat.completions
     if getattr(completions, _INSTRUMENTED_FLAG, False):
         return client
     original = completions.create
+    provider = _provider_label(client)
 
     def create(*args, **kwargs):
         rec = blackbox._resolve_recorder()
@@ -189,13 +205,14 @@ def instrument_openai(client: Any, blackbox) -> Any:
             rec.error(f"OpenAI call failed: {exc}", exception_type=type(exc).__name__)
             raise
         if kwargs.get("stream"):
-            return _RecordingStream(response, rec, model, prompt, params, t0)
+            return _RecordingStream(response, rec, model, prompt, params, t0,
+                                    provider=provider)
         parsed = _parse_completion(response)
         rec.llm_call(
             model=getattr(response, "model", model),
             prompt=prompt,
             response=parsed["text"],
-            provider="openai",
+            provider=provider,
             params=params,
             usage=parsed["usage"],
             tool_calls=parsed["tool_calls"],

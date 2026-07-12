@@ -1,18 +1,20 @@
 """
 The same support agent on the OpenAI SDK, fully recorded by the black box.
 
-Run:  OPENAI_API_KEY=... python examples/openai_support_agent.py
+API key comes from the environment: OPENAI_API_KEY (shell export or .env).
+
+Run:  python examples/openai_support_agent.py
 Then: blackbox list && blackbox report <session> && blackbox serve
 """
 
 import json
 
-from openai import OpenAI
-
 from agent_blackbox import BlackBox
+from agent_blackbox.clients import load_env_file, make_client
 
+load_env_file()
 bb = BlackBox("recordings", redact=True)
-client = bb.watch(OpenAI())                # every chat.completions.create recorded
+client = bb.watch(make_client("openai"))   # every chat.completions.create recorded
 
 KNOWLEDGE_BASE = [
     {"doc_id": "policy_2023_v1", "score": 0.91,

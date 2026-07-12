@@ -20,8 +20,29 @@ adapters activate only if those SDKs are installed.
 ```bash
 pip install -e .                    # from this directory
 # with SDK extras for auto-instrumentation:
-pip install -e ".[openai]"  or  ".[anthropic]"  or  ".[dev]"
+pip install -e ".[openai]"  or  ".[anthropic]"  or  ".[gemini]"  or  ".[dev]"
 ```
+
+## API keys come from the environment — never from code
+
+Copy `.env.example` to `.env`, fill in the keys you use (`.env` is gitignored),
+then:
+
+```python
+from agent_blackbox import BlackBox, load_env_file, make_client
+
+load_env_file()                     # reads .env; exported shell vars win
+bb = BlackBox("recordings")
+client = bb.watch(make_client("gemini"))     # "openai" | "anthropic" |
+                                             # "gemini" | "openrouter"
+```
+
+| Provider | Env vars | Notes |
+|---|---|---|
+| `openai` | `OPENAI_API_KEY` | |
+| `anthropic` | `ANTHROPIC_API_KEY` | |
+| `gemini` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` | google-genai SDK |
+| `openrouter` | `OPENROUTER_API_KEY` (+ optional `OPENROUTER_BASE_URL`, `OPENROUTER_SITE_URL`, `OPENROUTER_APP_NAME`) | OpenAI-compatible; one key, many models |
 
 ## 60-second start (no API key needed)
 
@@ -63,13 +84,23 @@ Notes:
   already useful.
 - **Exceptions** inside `bb.session(...)` are recorded with a full traceback
   before the session closes — the last seconds on the CVR.
-- **Anthropic thinking blocks** are captured as the call's `reasoning`
-  (request `thinking={"type": "adaptive", "display": "summarized"}` to get
-  readable summaries).
-- Supported today: sync `openai.OpenAI` (`chat.completions.create`, incl.
-  `stream=True`) and sync `anthropic.Anthropic` (`messages.create` incl.
-  `stream=True`, and the `messages.stream()` helper). Anything else: call the
-  `FlightRecorder` methods directly — they're the same events.
+- **Model reasoning is captured as the call's `reasoning`** — Anthropic
+  thinking blocks (request `thinking={"type": "adaptive", "display":
+  "summarized"}`) and Gemini thought summaries (request
+  `thinking_config=ThinkingConfig(include_thoughts=True)`).
+- **Session ids must be unique.** Starting a recorder with an id that already
+  has a recording raises `FileExistsError` instead of silently corrupting the
+  chain; use `store.delete(session_id)` if you really want to replace one.
+- Supported today (sync clients):
+  * `openai.OpenAI` — `chat.completions.create`, incl. `stream=True`
+  * **OpenRouter** and any OpenAI-compatible endpoint — same adapter; the
+    recording's `provider` field is labeled from the client's `base_url`
+  * `anthropic.Anthropic` — `messages.create` incl. `stream=True`, and the
+    `messages.stream()` helper
+  * `google.genai.Client` (Gemini) — `models.generate_content` and
+    `models.generate_content_stream`
+
+  Anything else: call the `FlightRecorder` methods directly — same events.
 
 ## Investigating an incident
 

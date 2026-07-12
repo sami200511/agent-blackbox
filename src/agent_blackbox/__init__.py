@@ -15,6 +15,7 @@ Quick start:
 Then investigate:  `blackbox list`, `blackbox report <session>`, `blackbox serve`.
 """
 
+from .clients import load_env_file, make_client, watched_client
 from .context import BlackBox, current_recorder
 from .core import (
     GENESIS_HASH,
@@ -45,5 +46,8 @@ __all__ = [
     "AblationResult",
     "make_redactor",
     "default_redactor",
+    "load_env_file",
+    "make_client",
+    "watched_client",
     "__version__",
 ]
