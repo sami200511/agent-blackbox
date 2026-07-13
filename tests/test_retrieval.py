@@ -63,6 +63,27 @@ def test_attribute_works_without_filenames():
     assert statuses[0]["status"] == "used"
 
 
+def test_bare_mention_is_not_credited_as_used():
+    # The model discusses the OLD policy while rejecting it; a bare mention in
+    # the reasoning must NOT make it "used" (answer reflects the current policy).
+    answer = ("Under our 30 day policy you are not eligible for a refund after "
+              "45 days; a warranty repair is available.")
+    reasoning = ("There is an old policy at refund-OLD.md with a 90 day window, "
+                 "but the current policy says 30 days.")
+    statuses, _ = attribute(answer, DOCS, cue_text=reasoning)
+    by_id = {s["doc_id"]: s for s in statuses}
+    assert by_id["refund-current.md"]["status"] == "used"
+    assert by_id["refund-OLD.md"]["status"] != "used"     # discussed, not used
+
+
+def test_endorsed_document_is_used_even_if_grounding_low():
+    answer = "Refunds are within 30 days; after that it is a warranty repair."
+    reasoning = "The FAQ confirms this: refunds follow the 30 day policy."
+    statuses, _ = attribute(answer, DOCS, cue_text=reasoning)
+    by_id = {s["doc_id"]: s for s in statuses}
+    assert by_id["faq.md"]["status"] == "used"            # endorsed via "confirms"
+
+
 def test_tokenize_drops_stopwords():
     toks = tokenize("The refund is within 30 days of delivery")
     assert "the" not in toks and "is" not in toks and "of" not in toks

@@ -24,7 +24,7 @@ import math
 import re
 from collections import Counter
 
-from .attribution import documents_referenced
+from .attribution import classify_references
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 _STOP = {
@@ -99,7 +99,7 @@ def grounding_scores(text: str, doc_texts: list, top: int = 20) -> list:
 
 
 def attribute(answer: str, docs: list, cue_text: str = None,
-              min_ground: float = 0.08) -> tuple:
+              min_ground: float = 0.12) -> tuple:
     """Label each retrieved doc used / ignored / unused from the model's output.
 
     `docs` is a list of {"doc_id", "text"}. Grounding is measured against
@@ -112,31 +112,43 @@ def attribute(answer: str, docs: list, cue_text: str = None,
     {"doc_id", "grounding", "status"} ordered by grounding (highest first);
     `grounding` maps doc_id -> score.
 
-      used    — the document's distinctive content appears in the answer
-      ignored — not grounded, AND named with an ignore-cue in `cue_text`
-      unused  — retrieved but its content is not reflected in the answer
+      used    — the answer reflects the doc's distinctive content (grounded),
+                OR the model endorsed it ("the FAQ confirms this")
+      ignored — the model named it with an ignore-cue ("superseded")
+      unused  — retrieved but not reflected in the answer (incl. bare mentions
+                the model discussed but did not rely on)
     """
     ids = [d["doc_id"] for d in docs]
     texts = [d.get("text", "") for d in docs]
     g = grounding_scores(answer, texts)
     gmap = dict(zip(ids, g))
     top = max(g) if g else 0.0
-    # A doc counts as USED only if its answer-grounding is a real fraction of the
-    # best one — so among near-identical policies, only the one the answer
-    # actually reflects (highest grounding) is credited, not both.
-    cut = max(min_ground, 0.5 * top)
-    _, ignored_cited = documents_referenced(cue_text if cue_text is not None else answer, ids)
+    # A doc is grounded only if its answer-grounding is a clear fraction of the
+    # best one — so among near-identical policies, incidental overlap from the
+    # superseded twin (which shares most vocabulary) stays below the line while
+    # the document the answer really reflects grounds well above it. Documents
+    # the model explicitly relied on are still credited via the endorsement path.
+    cut = max(min_ground, 0.6 * top)
+    cls = classify_references(cue_text if cue_text is not None else answer, ids)
 
     statuses = []
     for did in ids:
         score = gmap[did]
-        if score > 0 and score >= cut:
+        grounded = score > 0 and score >= cut
+        ref = cls.get(did)
+        # Grounding (answer content) and an explicit endorsement both mean used;
+        # an explicit ignore-cue means ignored. A BARE mention is not usage — a
+        # model discusses the documents it rejects, so that stays "unused".
+        if grounded or ref == "endorsed":
             status = "used"
-        elif did in ignored_cited:
+        elif ref == "ignored":
             status = "ignored"
         else:
             status = "unused"
         statuses.append({"doc_id": did, "grounding": score, "status": status})
 
-    statuses.sort(key=lambda s: s["grounding"], reverse=True)
+    # used first (best grounding first), so statuses[0] is the primary source;
+    # then ignored, then unused.
+    order = {"used": 0, "ignored": 1, "unused": 2}
+    statuses.sort(key=lambda s: (order[s["status"]], -s["grounding"]))
     return statuses, gmap

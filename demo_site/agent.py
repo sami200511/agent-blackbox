@@ -426,29 +426,31 @@ def _record_decision(rec, statuses, gmap, retrieval_seq, rerank_seq, grounding_s
     """
     tool_event = rec.last("tool_call")
     used = [s for s in statuses if s["status"] == "used"]
-    primary = statuses[0]["doc_id"] if (statuses and statuses[0]["grounding"] > 0) else "none"
+    # statuses[0] is the used doc with the best grounding (see attribute()).
+    primary = used[0]["doc_id"] if used else "none"
 
     if tool_event is not None:
         choice = f"used_tool:{tool_event['payload'].get('name')} (grounded on {primary})"
     elif used:
-        extra = f" (+{len(used) - 1} more)" if len(used) > 1 else ""
-        choice = f"answered_from_document:{primary}{extra}"
+        others = ", ".join(s["doc_id"] for s in used[1:])
+        choice = (f"answered_from:{primary}"
+                  + (f" + {others}" if others else ""))
     else:
-        choice = f"answered (top-ranked doc was {primary}; answer weakly grounded)"
+        choice = "answered — no document clearly used"
 
+    # PATHS NOT TAKEN lists only the documents the model did NOT use — the used
+    # ones are already named in the choice above. Grounding numbers live in the
+    # ANSWER GROUNDING block (section 03), not on every line here.
     alternatives = []
     for s in statuses:
-        if s["status"] == "used" and s["doc_id"] == primary:
-            continue
-        g = f" [grounding {s['grounding']:.2f}]"
+        did = s["doc_id"]
         if s["status"] == "used":
-            alternatives.append(f"use_document:{s['doc_id']} — also used{g}")
-        elif s["status"] == "ignored":
-            alternatives.append(f"use_document:{s['doc_id']} — model explicitly "
-                                f"IGNORED this (retrieval ranked it, model discarded it){g}")
+            continue
+        if s["status"] == "ignored":
+            alternatives.append(f"{did} — the model saw this but discarded it as "
+                                f"outdated/superseded (retrieval ranked it, model rejected it)")
         else:
-            alternatives.append(f"use_document:{s['doc_id']} — retrieved but not "
-                                f"reflected in the answer{g}")
+            alternatives.append(f"{did} — retrieved but not used")
     alternatives += ["ask_clarifying_question", "escalate_to_human"]
 
     evidence_refs = [s for s in (retrieval_seq, rerank_seq, grounding_seq, llm_seq)

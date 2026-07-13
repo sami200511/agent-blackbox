@@ -43,6 +43,39 @@ def test_matches_spaced_and_extensionless_names():
     assert "refund-policy-current.md" in used
 
 
+def test_matches_distinctive_keyword_without_filename():
+    # "FAQ" and "warranty" identify their docs even though the filename is not written
+    text = "The FAQ confirms this, and the warranty covers a repair."
+    used, ignored = documents_referenced(text, DOCS)
+    assert "company-faq.md" in used
+    # (no warranty doc in DOCS here, so just check faq is picked up by keyword)
+
+
+def test_ignore_cue_before_the_filename():
+    text = ("The old policy is superseded, so I ignore refund-policy-OLD.md. "
+            "The current policy says 30 days.")
+    used, ignored = documents_referenced(text, DOCS)
+    assert ignored == ["refund-policy-OLD.md"]
+    assert "refund-policy-OLD.md" not in used
+
+
+def test_no_cross_sentence_cue_leak():
+    # 'current policy' (a use-cue) in the NEXT sentence must not rescue OLD
+    text = ("refund-policy-OLD.md is superseded so I ignore it. "
+            "The current policy says 30 days.")
+    used, ignored = documents_referenced(text, DOCS)
+    assert ignored == ["refund-policy-OLD.md"]
+
+
+def test_ambiguous_word_old_does_not_false_match():
+    # "the old one" must NOT be attributed to refund-policy-OLD.md
+    text = "refund-policy-current.md is in effect; it replaces the old one."
+    used, ignored = documents_referenced(text, DOCS)
+    assert "refund-policy-current.md" in used
+    assert "refund-policy-OLD.md" not in ignored
+    assert "refund-policy-OLD.md" not in used
+
+
 def test_empty_text():
     assert documents_referenced("", DOCS) == ([], [])
     assert documents_referenced(None, DOCS) == ([], [])
