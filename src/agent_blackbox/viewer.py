@@ -179,6 +179,29 @@ def _rerank_rows(ev: dict) -> str:
     return rows or "<p style='color:var(--dim)'>no rerank results</p>"
 
 
+_GROUND_STATUS = {
+    "used": ("used", "var(--green)"),
+    "ignored": ("model IGNORED", "var(--red)"),
+    "unused": ("not reflected", "var(--dim)"),
+}
+
+
+def _grounding_rows(ev: dict) -> str:
+    """Render the answer-grounding score per document — the strongest signal
+    for which document the answer was actually built on."""
+    rows = ""
+    for r in sorted(ev["payload"].get("scores", []),
+                    key=lambda s: s.get("grounding_score", 0), reverse=True):
+        label, colour = _GROUND_STATUS.get(r.get("status"), (r.get("status"), "var(--dim)"))
+        rows += (
+            f"<div class='chunk'><div class='chunk-head'>"
+            f"<span class='mono'>{esc(r.get('doc_id'))}</span>"
+            f"<span class='score' style='color:{colour}'>grounding "
+            f"{esc(r.get('grounding_score'))} · {esc(label)}</span></div></div>"
+        )
+    return rows or "<p style='color:var(--dim)'>no grounding scores</p>"
+
+
 def _page(title: str, header_right: str, body: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -217,6 +240,7 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
     llm_calls = [e for e in events if e["type"] == "llm_call"]
     retrievals = [e for e in events if e["type"] == "retrieval"]
     reranks = [e for e in events if e["type"] == "rerank"]
+    groundings = [e for e in events if e["type"] == "grounding"]
     tool_calls = [e for e in events if e["type"] == "tool_call"]
     annotations = [e for e in events if e["type"] == "annotation"]
     errors = [e for e in events if e["type"] == "error"]
@@ -296,6 +320,12 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
                 ev_blocks += (
                     f"<div class='evidence'><div class='ev-label'>SEQ {ref} · "
                     f"{_rerank_label(ev)}</div>{_rerank_rows(ev)}</div>"
+                )
+            elif ev["type"] == "grounding":
+                ev_blocks += (
+                    f"<div class='evidence'><div class='ev-label'>SEQ {ref} · "
+                    f"ANSWER GROUNDING — which document the answer actually "
+                    f"reflects</div>{_grounding_rows(ev)}</div>"
                 )
             elif ev["type"] == "llm_call":
                 ev_blocks += (
@@ -383,6 +413,13 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
             f"<div class='evidence'><div class='ev-label'>SEQ {e['seq']} · "
             f"{_rerank_label(e)}</div>{_rerank_rows(e)}</div>"
         )
+    for e in groundings:
+        retrieval_html += (
+            f"<div class='evidence'><div class='ev-label'>SEQ {e['seq']} · "
+            f"ANSWER GROUNDING — how much of each document the answer actually "
+            f"reflects (the strongest signal of what was used)</div>"
+            f"{_grounding_rows(e)}</div>"
+        )
 
     tool_html = ""
     for e in tool_calls:
@@ -400,7 +437,7 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
     type_class = {
         "user_input": "t-in", "final_output": "t-out", "decision": "t-dec",
         "llm_call": "t-llm", "retrieval": "t-ret", "rerank": "t-ret",
-        "self_explanation": "t-llm",
+        "grounding": "t-ret", "self_explanation": "t-llm",
         "tool_call": "t-tool", "error": "t-err", "annotation": "t-flag",
     }
     rows = ""

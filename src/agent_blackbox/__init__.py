@@ -27,6 +27,7 @@ from .core import (
 )
 from .redact import default_redactor, make_redactor
 from .replay import AblationResult, CounterfactualReplay
+from .retrieval import attribute, bm25, grounding_scores
 from .summarize import condense_reason
 from .storage import JsonlStore, SessionInfo, SqliteStore, open_store
 
@@ -48,6 +49,9 @@ __all__ = [
     "AblationResult",
     "condense_reason",
     "documents_referenced",
+    "attribute",
+    "bm25",
+    "grounding_scores",
     "make_redactor",
     "default_redactor",
     "load_env_file",

@@ -17,14 +17,14 @@ breaks when PEP 563 turns them into strings.
 
 import json
 import os
-import re
 
 import httpx
 
 from agent_blackbox import (
     BlackBox,
+    attribute,
+    bm25,
     condense_reason,
-    documents_referenced,
     load_env_file,
     make_client,
 )
@@ -230,22 +230,18 @@ def _load_documents() -> list:
 
 DOCUMENTS = _load_documents()
 
-_STOPWORDS = {"the", "and", "for", "can", "what", "how", "with", "you",
-              "your", "have", "this", "that", "please"}
-
 
 def retrieve(question: str, top_k: int = 5) -> list:
-    """Tiny keyword retriever — swap for your vector store in a real system."""
-    words = [w for w in re.findall(r"[a-z]{3,}", question.lower())
-             if w not in _STOPWORDS]
-    scored = []
-    for doc in DOCUMENTS:
-        text = doc["text"].lower()
-        score = sum(text.count(w) for w in words)
-        if score > 0:
-            scored.append({**doc, "score": round(score / (len(words) or 1), 2)})
-    scored.sort(key=lambda d: d["score"], reverse=True)
-    return scored[:top_k]
+    """Retrieve documents by BM25 relevance — a principled score that weights
+    rare, discriminating terms, instead of naive term-frequency counting (which
+    tied documents that share vocabulary). Swap for your vector store in a real
+    system."""
+    scores = bm25(question, [d["text"] for d in DOCUMENTS])
+    ranked = sorted(
+        ({**d, "score": s} for d, s in zip(DOCUMENTS, scores) if s > 0),
+        key=lambda d: d["score"], reverse=True,
+    )
+    return ranked[:top_k]
 
 
 def rerank_chunks(question: str, chunks: list, rec):
@@ -417,43 +413,46 @@ def _self_explain(provider, model, context, question, answer, rec):
     return None
 
 
-def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq,
-                     llm_seq, stated_reason, used_docs, ignored_docs):
+def _record_decision(rec, statuses, gmap, retrieval_seq, rerank_seq, grounding_seq,
+                     llm_seq, stated_reason):
     """Build a decision event from what actually happened this turn.
 
-    `choice` reflects the document(s) the MODEL actually relied on (read from
-    its own words), not merely the top-ranked chunk — so a model that correctly
-    discards a higher-ranked but outdated document is credited for it.
-    `stated_reason` is a SHORT version of the model's own why (testimony, not
-    proof); the full reasoning lives in the model-calls section. `evidence_refs`
-    point at the retrieval, the rerank, and the LLM call.
+    `statuses` (from agent_blackbox.attribute) is ordered by answer-grounding,
+    so statuses[0] is the document the answer most reflects — the choice —
+    regardless of how retrieval ranked it. Each other document is labelled by
+    how the model treated it (ignored / not reflected), with its grounding
+    score, so a model that discards a higher-ranked but outdated document is
+    credited for it. `stated_reason` is a SHORT version of the model's own why.
     """
     tool_event = rec.last("tool_call")
-    # Prefer what the model said it used; fall back to the top-ranked chunk.
-    primary = (used_docs[0] if used_docs
-               else (used_chunks[0]["doc_id"] if used_chunks else "none"))
+    used = [s for s in statuses if s["status"] == "used"]
+    primary = statuses[0]["doc_id"] if (statuses and statuses[0]["grounding"] > 0) else "none"
 
     if tool_event is not None:
         choice = f"used_tool:{tool_event['payload'].get('name')} (grounded on {primary})"
-    elif used_docs:
-        extra = f" (+{len(used_docs) - 1} more)" if len(used_docs) > 1 else ""
+    elif used:
+        extra = f" (+{len(used) - 1} more)" if len(used) > 1 else ""
         choice = f"answered_from_document:{primary}{extra}"
     else:
-        # No document was clearly cited — say so instead of guessing.
-        choice = f"answered (top-ranked doc was {primary}; model did not cite a source)"
+        choice = f"answered (top-ranked doc was {primary}; answer weakly grounded)"
 
     alternatives = []
-    for c in all_chunks:
-        did = c["doc_id"]
-        if did in used_docs:
+    for s in statuses:
+        if s["status"] == "used" and s["doc_id"] == primary:
             continue
-        label = f"use_document:{did}"
-        if did in ignored_docs:
-            label += " — model explicitly IGNORED this (retrieval ranked it, model discarded it)"
-        alternatives.append(label)
+        g = f" [grounding {s['grounding']:.2f}]"
+        if s["status"] == "used":
+            alternatives.append(f"use_document:{s['doc_id']} — also used{g}")
+        elif s["status"] == "ignored":
+            alternatives.append(f"use_document:{s['doc_id']} — model explicitly "
+                                f"IGNORED this (retrieval ranked it, model discarded it){g}")
+        else:
+            alternatives.append(f"use_document:{s['doc_id']} — retrieved but not "
+                                f"reflected in the answer{g}")
     alternatives += ["ask_clarifying_question", "escalate_to_human"]
 
-    evidence_refs = [s for s in (retrieval_seq, rerank_seq, llm_seq) if s is not None]
+    evidence_refs = [s for s in (retrieval_seq, rerank_seq, grounding_seq, llm_seq)
+                     if s is not None]
     rec.decision(choice=choice, alternatives=alternatives,
                  stated_reason=stated_reason, evidence_refs=evidence_refs)
 
@@ -520,16 +519,25 @@ def ask(question: str, model_id: str = "gemini-3.5-flash",
                         "was available. Compare the response against the "
                         "retrieved evidence on the right.")
 
-            # Which documents did the model ACTUALLY use vs. ignore? Read it from
-            # the model's own words (reasoning / self-explanation / answer), not
-            # from the retrieval ranking — a tied or mis-ranked outdated doc must
-            # not be reported as the source when the model discarded it.
-            grounding = " ".join(filter(None, [reasoning, explanation, answer]))
-            doc_ids = [c["doc_id"] for c in all_chunks]
-            used_docs, ignored_docs = documents_referenced(grounding, doc_ids)
+            # Which documents did the model ACTUALLY use? Score each retrieved
+            # doc by how much of its DISTINCTIVE content appears in the ANSWER
+            # (grounding) — this works for any model without it naming files,
+            # and separates near-identical docs (the answer reflects the current
+            # policy, not the superseded one). The reasoning is used only to
+            # catch explicit "I'll ignore X" statements, since a model quotes
+            # the docs it rejects while thinking.
+            attr_docs = [{"doc_id": c["doc_id"], "text": c["text"]} for c in all_chunks]
+            cue_text = " ".join(filter(None, [reasoning, explanation, answer]))
+            statuses, gmap = attribute(answer + " " + explanation, attr_docs,
+                                       cue_text=cue_text)
+            grounding_seq = rec.custom("grounding", {
+                "method": "distinctive-term overlap of the ANSWER with each document",
+                "scores": [{"doc_id": s["doc_id"], "grounding_score": s["grounding"],
+                            "status": s["status"]} for s in statuses],
+            })
 
-            _record_decision(rec, all_chunks, chunks, retrieval_seq, rerank_seq,
-                             llm_seq, stated_reason, used_docs, ignored_docs)
+            _record_decision(rec, statuses, gmap, retrieval_seq, rerank_seq,
+                             grounding_seq, llm_seq, stated_reason)
 
             rec.final_output(answer)
             return answer, session_id

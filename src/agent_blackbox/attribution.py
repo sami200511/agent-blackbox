@@ -35,7 +35,9 @@ USE_CUES = (
 )
 
 _FORWARD = 55   # chars after a mention to scan for cues
-_BACK = 15      # a little context before the mention too
+_BACK = 0       # forward-only: a cue ("X is superseded") describes the doc it
+                # follows, so scanning backwards leaks one doc's cue onto the
+                # next doc's mention ("...ignore OLD. current.md says...")
 
 
 def _variants(doc_id: str) -> list:

@@ -44,13 +44,37 @@ Try:
 ## What gets recorded (per question)
 
 ```
-session_start → user_input → retrieval (keyword scores)
-→ rerank (relevance scores, or the failure) → system_prompt
+session_start → user_input → retrieval (BM25 scores)
+→ rerank (OpenRouter relevance scores, or the failure)
+→ grounding (which document the ANSWER actually reflects) → system_prompt
 → tool_call(s) (name, arguments, result, latency)
 → llm_call (prompt, response, model reasoning, tokens, provider, model)
 → decision (choice, alternatives, stated reason, evidence refs)
 → final_output → session_end          (errors + tracebacks recorded too)
 ```
+
+### Three scores, from weakest to strongest signal
+
+The report shows all three side by side so you can see where retrieval and the
+model disagree:
+
+1. **BM25 retrieval score** — principled keyword relevance (replaces naive
+   term-frequency, which tied documents that share vocabulary). Still ties the
+   two refund policies, because they genuinely share query words — a real,
+   visible retrieval weakness.
+2. **OpenRouter rerank relevance** — a purpose-built relevance model; better,
+   but for near-identical documents it can still get them wrong.
+3. **Answer grounding** — how much of each document's *distinctive* content
+   actually appears in the model's answer. This is the strongest signal for
+   what the model really used, and it **works for any model without it naming
+   the file**. It cleanly separates the two policies: the answer reflects the
+   current 30-day policy, so `current.md` grounds high and the superseded
+   `OLD.md` grounds ~0.
+
+The decision's **choice** is set from the highest-grounded document, so a model
+that correctly discards a higher-*ranked* but outdated document is credited for
+it — and the outdated one is labelled *"retrieved but not reflected in the
+answer"* under PATHS NOT TAKEN.
 
 Because the agent records a `decision` that links the retrieval, the rerank
 and the LLM call as `evidence_refs`, every real session's report is as rich
