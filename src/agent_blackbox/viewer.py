@@ -128,6 +128,9 @@ _CSS = """
   .t-out summary .etype { color:var(--orange); }
   .t-dec summary .etype { color:var(--amber); }
   .t-llm summary .etype { color:#7FB4FF; }
+  .t-ret summary .etype { color:#B99BFF; }
+  .t-tool summary .etype { color:#5FD0C8; }
+  .evidence.err { border-color:var(--red); }
   .t-err summary .etype,.t-flag summary .etype { color:var(--red); }
   pre { font-family:var(--mono); }
 
@@ -150,6 +153,30 @@ def esc(s) -> str:
     if not isinstance(s, str):
         s = json.dumps(s, ensure_ascii=False, indent=2)
     return html.escape(s)
+
+
+def _rerank_label(ev: dict) -> str:
+    p = ev["payload"]
+    model = esc(p.get("model", "reranker"))
+    if p.get("error"):
+        return f"RERANK ({model}) — FAILED, fell back to keyword order"
+    return f"RERANK ({model}) — re-scored relevance"
+
+
+def _rerank_rows(ev: dict) -> str:
+    p = ev["payload"]
+    if p.get("error"):
+        return (f"<p class='reasoning'>{esc(p.get('error'))}</p>"
+                f"<p style='color:var(--dim);font-size:12px'>{esc(p.get('note'))}</p>")
+    rows = ""
+    for r in p.get("results", []):
+        rows += (
+            f"<div class='chunk'><div class='chunk-head'>"
+            f"<span class='mono'>{esc(r.get('doc_id'))}</span>"
+            f"<span class='score'>relevance {esc(r.get('relevance_score'))}</span></div>"
+            f"<div class='chunk-src mono'>{esc(r.get('source'))}</div></div>"
+        )
+    return rows or "<p style='color:var(--dim)'>no rerank results</p>"
 
 
 def _page(title: str, header_right: str, body: str) -> str:
@@ -188,6 +215,9 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
     finals = [e for e in events if e["type"] == "final_output"]
     decisions = [e for e in events if e["type"] == "decision"]
     llm_calls = [e for e in events if e["type"] == "llm_call"]
+    retrievals = [e for e in events if e["type"] == "retrieval"]
+    reranks = [e for e in events if e["type"] == "rerank"]
+    tool_calls = [e for e in events if e["type"] == "tool_call"]
     annotations = [e for e in events if e["type"] == "annotation"]
     errors = [e for e in events if e["type"] == "error"]
 
@@ -262,6 +292,11 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
                     f"<div class='evidence'><div class='ev-label'>SEQ {ref} · RETRIEVAL "
                     f"— everything the agent could see</div>{rows}</div>"
                 )
+            elif ev["type"] == "rerank":
+                ev_blocks += (
+                    f"<div class='evidence'><div class='ev-label'>SEQ {ref} · "
+                    f"{_rerank_label(ev)}</div>{_rerank_rows(ev)}</div>"
+                )
             elif ev["type"] == "llm_call":
                 ev_blocks += (
                     f"<div class='evidence'><div class='ev-label'>SEQ {ref} · MODEL "
@@ -325,10 +360,47 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
       </div>
     </div>"""
 
+    # ---------- retrieval, reranking & tool actions ----------
+    retrieval_html = ""
+    for e in retrievals:
+        p = e["payload"]
+        rows_r = ""
+        for c in p.get("chunks", []):
+            rows_r += (
+                f"<div class='chunk'><div class='chunk-head'>"
+                f"<span class='mono'>{esc(c.get('doc_id'))}</span>"
+                f"<span class='score'>keyword {esc(c.get('score'))}</span></div>"
+                f"<div class='chunk-src mono'>{esc(c.get('source'))}</div>"
+                f"<p>{esc(c.get('text'))}</p></div>"
+            )
+        retrieval_html += (
+            f"<div class='evidence'><div class='ev-label'>SEQ {e['seq']} · RETRIEVAL "
+            f"— query \"{esc(p.get('query'))}\" — everything the agent could see</div>"
+            f"{rows_r or '<p style=\"color:var(--dim)\">no documents matched</p>'}</div>"
+        )
+    for e in reranks:
+        retrieval_html += (
+            f"<div class='evidence'><div class='ev-label'>SEQ {e['seq']} · "
+            f"{_rerank_label(e)}</div>{_rerank_rows(e)}</div>"
+        )
+
+    tool_html = ""
+    for e in tool_calls:
+        p = e["payload"]
+        ok_cls = "" if p.get("ok", True) else " err"
+        lat = f" · {p['latency_ms']} ms" if p.get("latency_ms") is not None else ""
+        tool_html += (
+            f"<div class='evidence{ok_cls}'><div class='ev-label'>SEQ {e['seq']} · "
+            f"TOOL {esc(p.get('name'))} · {'ok' if p.get('ok', True) else 'FAILED'}{lat}</div>"
+            f"<div class='ev-label'>arguments</div><pre>{esc(p.get('arguments'))}</pre>"
+            f"<div class='ev-label'>result</div><pre>{esc(p.get('result'))}</pre></div>"
+        )
+
     # ---------- timeline ----------
     type_class = {
         "user_input": "t-in", "final_output": "t-out", "decision": "t-dec",
-        "llm_call": "t-llm", "error": "t-err", "annotation": "t-flag",
+        "llm_call": "t-llm", "retrieval": "t-ret", "rerank": "t-ret",
+        "tool_call": "t-tool", "error": "t-err", "annotation": "t-flag",
     }
     rows = ""
     for e in events:
@@ -365,13 +437,19 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
     <h2>02 · What went in vs what came out</h2>
     {io_html or "<p style='color:var(--dim)'>No user input / final output recorded.</p>"}
 
-    <h2>03 · Model calls — cockpit voice recorder ({len(llm_calls)})</h2>
+    <h2>03 · Retrieval &amp; reranking — what the agent could see</h2>
+    {retrieval_html or "<p style='color:var(--dim)'>No retrieval recorded.</p>"}
+
+    <h2>04 · Model calls — cockpit voice recorder ({len(llm_calls)})</h2>
     {llm_html or "<p style='color:var(--dim)'>No LLM calls recorded.</p>"}
 
-    <h2>04 · Decision analysis — stated reason vs evidence</h2>
+    <h2>05 · Actions taken — tool calls ({len(tool_calls)})</h2>
+    {tool_html or "<p style='color:var(--dim)'>No tool calls recorded.</p>"}
+
+    <h2>06 · Decision analysis — stated reason vs evidence</h2>
     {decision_html or "<p style='color:var(--dim)'>No decision events recorded.</p>"}
 
-    <h2>05 · Full timeline ({len(events)} events — click any row)</h2>
+    <h2>07 · Full timeline ({len(events)} events — click any row)</h2>
     {rows}
 """
     return _page(f"Incident Report · {session.get('session_id', '?')}", header_right, body)

@@ -131,6 +131,32 @@ def test_system_prompt_once(tmp_path):
     assert sum(1 for e in events if e["type"] == "system_prompt") == 2
 
 
+def test_last_and_current_seq(tmp_path):
+    rec = FlightRecorder(session_id="last1", directory=str(tmp_path))
+    r_seq = rec.retrieval("q", chunks=[{"doc_id": "a", "text": "t"}])
+    assert rec.current_seq == r_seq
+    l_seq = rec.llm_call(model="m", prompt="p", response="r", reasoning="because")
+    assert rec.current_seq == l_seq
+    # last() returns the actual written event, reflecting redaction/truncation
+    llm = rec.last("llm_call")
+    assert llm["seq"] == l_seq
+    assert llm["payload"]["reasoning"] == "because"
+    assert rec.last("retrieval")["seq"] == r_seq
+    assert rec.last("tool_call") is None
+    rec.close()
+
+
+def test_last_is_per_recorder(tmp_path):
+    from agent_blackbox import BlackBox
+
+    bb = BlackBox(directory=str(tmp_path))
+    with bb.session(session_id="A") as a:
+        a.tool_call("t", {}, "x")
+        assert a.last("tool_call") is not None
+    with bb.session(session_id="B") as b:
+        assert b.last("tool_call") is None  # fresh recorder, no leakage
+
+
 def test_nonjson_payloads_are_captured(tmp_path):
     class Weird:
         def __repr__(self):

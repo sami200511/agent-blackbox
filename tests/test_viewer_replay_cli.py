@@ -44,6 +44,63 @@ def test_report_shows_tampering(demo_bb, tmp_path):
     assert "TAMPERING DETECTED" in html_doc
 
 
+def test_report_shows_retrieval_rerank_and_decision(tmp_path):
+    """An auto-recorded style session (retrieval + rerank + llm + decision)
+    must render the retrieval, rerank and decision sections — the data the
+    real agent produces, matching the demo's richness."""
+    bb = BlackBox(directory=str(tmp_path))
+    with bb.session(session_id="rich-1", pilot="web-agent") as rec:
+        rec.user_input("refund after 30 days?")
+        r_seq = rec.retrieval("refund policy", chunks=[
+            {"doc_id": "policy-OLD.md", "source": "docs/OLD", "score": 1.14,
+             "text": "90 day refunds"},
+            {"doc_id": "policy-current.md", "source": "docs/current", "score": 1.10,
+             "text": "30 day window"},
+        ])
+        rr_seq = rec.custom("rerank", {
+            "provider": "openrouter", "model": "nvidia/rerank",
+            "results": [
+                {"doc_id": "policy-current.md", "source": "docs/current",
+                 "relevance_score": 0.91},
+                {"doc_id": "policy-OLD.md", "source": "docs/OLD",
+                 "relevance_score": 0.42},
+            ],
+        })
+        l_seq = rec.llm_call(model="gemini-3.5-flash", provider="gemini",
+                             prompt="...", response="30 days.",
+                             reasoning="The current policy says 30 days.")
+        rec.decision(choice="answered_from_document:policy-current.md",
+                     alternatives=["use_document:policy-OLD.md", "escalate_to_human"],
+                     stated_reason="The current policy says 30 days.",
+                     evidence_refs=[r_seq, rr_seq, l_seq])
+        rec.final_output("You can get a refund within 30 days.")
+
+    html_doc = build_report(bb.load("rich-1"))
+    # dedicated retrieval/rerank section
+    assert "Retrieval &amp; reranking" in html_doc
+    assert "keyword 1.14" in html_doc
+    assert "RERANK" in html_doc and "relevance 0.91" in html_doc
+    # model reasoning (CVR) present
+    assert "Model reasoning" in html_doc
+    assert "The current policy says 30 days." in html_doc
+    # decision analysis populated with evidence, not the empty placeholder
+    assert "answered_from_document:policy-current.md" in html_doc
+    assert "No decision events recorded." not in html_doc
+    # rerank rendered inside the decision evidence too
+    assert html_doc.count("relevance 0.91") >= 2
+
+
+def test_report_rerank_failure_shown(tmp_path):
+    bb = BlackBox(directory=str(tmp_path))
+    with bb.session(session_id="rich-2") as rec:
+        rec.retrieval("q", chunks=[{"doc_id": "d", "text": "t", "score": 1.0}])
+        rec.custom("rerank", {"provider": "openrouter", "model": "nvidia/rerank",
+                              "error": "401 Unauthorized",
+                              "note": "rerank failed; falling back to keyword ranking"})
+    html_doc = build_report(bb.load("rich-2"))
+    assert "FAILED" in html_doc and "401 Unauthorized" in html_doc
+
+
 def test_index_lists_sessions(demo_bb):
     bb, sid = demo_bb
     html_doc = build_index(bb.list_sessions())

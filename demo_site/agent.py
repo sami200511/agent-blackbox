@@ -242,14 +242,15 @@ def retrieve(question: str, top_k: int = 5) -> list:
     return scored[:top_k]
 
 
-def rerank_chunks(question: str, chunks: list, rec) -> list:
+def rerank_chunks(question: str, chunks: list, rec):
     """Rerank retrieved chunks with OpenRouter's rerank API (if key present).
 
     Recorded as a custom `rerank` black-box event either way (result or
     failure), so investigations show exactly how the final ranking happened.
+    Returns (reranked_chunks, rerank_event_seq_or_None).
     """
     if not chunks or not has_key("openrouter"):
-        return chunks
+        return chunks, None
     try:
         resp = httpx.post(
             RERANK_URL,
@@ -265,19 +266,20 @@ def rerank_chunks(question: str, chunks: list, rec) -> list:
         reranked = [{**chunks[r["index"]],
                      "rerank_score": round(r["relevance_score"], 4)}
                     for r in results]
-        rec.custom("rerank", {
+        seq = rec.custom("rerank", {
             "provider": "openrouter", "model": RERANK_MODEL, "query": question,
             "results": [{"doc_id": chunks[r["index"]]["doc_id"],
+                         "source": chunks[r["index"]].get("source"),
                          "relevance_score": round(r["relevance_score"], 4)}
                         for r in results],
         })
-        return reranked
+        return reranked, seq
     except Exception as exc:
-        rec.custom("rerank", {
+        seq = rec.custom("rerank", {
             "provider": "openrouter", "model": RERANK_MODEL, "error": str(exc),
             "note": "rerank failed; falling back to keyword ranking",
         })
-        return chunks
+        return chunks, seq
 
 
 # ------------------------------------------------------- per-provider ask ---
@@ -349,6 +351,41 @@ def _ask_anthropic(client, model: str, context: str, question: str) -> str:
 
 
 # ------------------------------------------------------------------ agent ---
+def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq):
+    """Build a decision event from what actually happened this turn.
+
+    `stated_reason` is the model's own reasoning (thinking) if it exposed any
+    — testimony, not proof. `evidence_refs` point at the retrieval, the rerank,
+    and the LLM call so the report shows what the agent saw vs what it said.
+    A tool_call this turn means the agent acted, not just answered.
+    """
+    llm_event = rec.last("llm_call")
+    llm_seq = llm_event["seq"] if llm_event else None
+    reasoning = (llm_event or {}).get("payload", {}).get("reasoning") if llm_event else None
+    tool_event = rec.last("tool_call")
+    top_doc = used_chunks[0]["doc_id"] if used_chunks else "none"
+
+    if tool_event is not None:
+        choice = f"used_tool:{tool_event['payload'].get('name')} (grounded on {top_doc})"
+    else:
+        choice = f"answered_from_document:{top_doc}"
+
+    # Alternatives = the other documents it could have leaned on, plus the
+    # two default fallbacks every support turn has.
+    alternatives = [f"use_document:{c['doc_id']}" for c in all_chunks
+                    if c["doc_id"] != top_doc]
+    alternatives += ["ask_clarifying_question", "escalate_to_human"]
+
+    stated_reason = reasoning or (
+        "The model did not expose explicit reasoning for this answer. Compare "
+        "the response against the retrieved evidence on the right to judge "
+        "whether it used the correct (most recent) document."
+    )
+    evidence_refs = [s for s in (retrieval_seq, rerank_seq, llm_seq) if s is not None]
+    rec.decision(choice=choice, alternatives=alternatives,
+                 stated_reason=stated_reason, evidence_refs=evidence_refs)
+
+
 def ask(question: str, model_id: str = "gemini-3.5-flash",
         custom_model: str = "", user_id: str = "web-visitor"):
     """Answer one question with the chosen model.
@@ -374,9 +411,10 @@ def ask(question: str, model_id: str = "gemini-3.5-flash",
             session_id = rec.session_id
             rec.user_input(question, user_id=user_id, channel="web")
 
-            chunks = retrieve(question)
-            rec.retrieval(query=question, chunks=chunks)
-            chunks = rerank_chunks(question, chunks, rec)[:3]
+            all_chunks = retrieve(question)
+            retrieval_seq = rec.retrieval(query=question, chunks=all_chunks)
+            reranked, rerank_seq = rerank_chunks(question, all_chunks, rec)
+            chunks = reranked[:3]
             context = "\n\n".join(
                 f"--- {c['doc_id']} ---\n{c['text']}" for c in chunks
             ) or "(no relevant documents found)"
@@ -387,6 +425,10 @@ def ask(question: str, model_id: str = "gemini-3.5-flash",
                 answer = _ask_anthropic(client, model, context, question)
             else:  # openai / openrouter share the OpenAI-compatible path
                 answer = _ask_openai_compat(client, model, context, question)
+
+            # Record the decision so the report shows the agent's stated reason
+            # side-by-side with ALL the evidence it had (used and ignored).
+            _record_decision(rec, all_chunks, chunks, retrieval_seq, rerank_seq)
 
             rec.final_output(answer)
             return answer, session_id

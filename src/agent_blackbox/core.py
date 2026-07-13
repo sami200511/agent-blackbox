@@ -125,6 +125,7 @@ class FlightRecorder:
         self._closed = False
         self._lock = threading.Lock()
         self._seen_system_prompts: set[str] = set()
+        self._last_by_type: dict[str, dict] = {}
         self._write_event("session_start", {"pilot": pilot, "metadata": metadata or {}})
 
     # Path of the recording when backed by files (None for DB stores).
@@ -167,7 +168,21 @@ class FlightRecorder:
             event["hash"] = event_hash(self._prev_hash, event)
             self._prev_hash = event["hash"]
             self.store.append(event)
+            self._last_by_type[event_type] = event
             return self._seq
+
+    def last(self, event_type: str) -> Optional[dict]:
+        """The most recent event of `event_type` written this session (or None).
+
+        Lets an agent reference an auto-recorded event — e.g. the seq of the
+        `llm_call` the instrumentation just wrote — when building a decision.
+        """
+        return self._last_by_type.get(event_type)
+
+    @property
+    def current_seq(self) -> int:
+        """Sequence number of the most recently written event."""
+        return self._seq
 
     # ------------------------------------------------------------------ #
     # Recording API — one method per kind of thing an agent does

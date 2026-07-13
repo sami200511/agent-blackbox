@@ -48,8 +48,17 @@ session_start → user_input → retrieval (keyword scores)
 → rerank (relevance scores, or the failure) → system_prompt
 → tool_call(s) (name, arguments, result, latency)
 → llm_call (prompt, response, model reasoning, tokens, provider, model)
+→ decision (choice, alternatives, stated reason, evidence refs)
 → final_output → session_end          (errors + tracebacks recorded too)
 ```
+
+Because the agent records a `decision` that links the retrieval, the rerank
+and the LLM call as `evidence_refs`, every real session's report is as rich
+as `blackbox demo`: a **Retrieval & reranking** section (keyword vs. relevance
+scores), the **Model reasoning (CVR)**, and a **Decision analysis** panel that
+puts the model's stated reason next to *all* the evidence it had — including
+the documents it ignored. The model's own thinking becomes the stated reason,
+so you can see whether it leaned on the correct (most recent) policy.
 
 Recordings live in `demo_site/recordings/`:
 
