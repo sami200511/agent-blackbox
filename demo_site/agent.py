@@ -291,7 +291,10 @@ def _ask_gemini(client, model: str, context: str, question: str) -> str:
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             tools=[create_support_ticket, check_order_status],
-            thinking_config=types.ThinkingConfig(include_thoughts=True),
+            # thinking_level="high" makes Gemini 3 return a real thought
+            # summary — without it, flash-lite produces no reasoning at all.
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=True, thinking_level="high"),
         ),
     )
     return response.text or "(the model returned no text)"
@@ -351,17 +354,73 @@ def _ask_anthropic(client, model: str, context: str, question: str) -> str:
 
 
 # ------------------------------------------------------------------ agent ---
-def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq):
+_meta_clients: dict = {}
+
+
+def _meta_client(provider: str):
+    """An UNWATCHED client for meta-calls (self-explanation) so they don't
+    show up as extra LLM calls in the recording's cockpit-voice section."""
+    if provider not in _meta_clients:
+        _meta_clients[provider] = make_client(provider)
+    return _meta_clients[provider]
+
+
+def _self_explain(provider, model, context, question, answer, rec):
+    """Ask the model to state, in 1-2 sentences, which document it used and why.
+
+    A post-hoc self-explanation for models that don't expose thinking (OpenAI,
+    most OpenRouter models). It's testimony, not proof — recorded as its own
+    `self_explanation` event and clearly labeled in the report.
+    """
+    prompt = (
+        "You just answered a customer support question using the documents "
+        "below. In 1-2 sentences, state which specific document you based your "
+        "answer on and why. Name the document.\n\n"
+        f"Documents:\n{context}\n\nQuestion: {question}\n\nYour answer: {answer}\n\n"
+        "Which document did you rely on, and why?"
+    )
+    try:
+        client = _meta_client(provider)
+        if provider == "gemini":
+            from google.genai import types
+            r = client.models.generate_content(
+                model=model, contents=prompt,
+                config=types.GenerateContentConfig(max_output_tokens=512))
+            text = r.text
+        elif provider == "anthropic":
+            r = client.messages.create(
+                model=model, max_tokens=400,
+                messages=[{"role": "user", "content": prompt}])
+            text = "".join(b.text for b in r.content if b.type == "text")
+        else:  # openai / openrouter
+            r = client.chat.completions.create(
+                model=model, max_tokens=250,
+                messages=[{"role": "user", "content": prompt}])
+            text = r.choices[0].message.content
+        text = (text or "").strip()
+        if text:
+            rec.custom("self_explanation", {
+                "provider": provider, "model": model,
+                "asked": "which document did you rely on, and why?",
+                "response": text})
+            return text
+    except Exception as exc:
+        rec.custom("self_explanation", {
+            "provider": provider, "model": model, "error": str(exc),
+            "note": "self-explanation call failed"})
+    return None
+
+
+def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq,
+                     llm_seq, reasoning, reason_source):
     """Build a decision event from what actually happened this turn.
 
-    `stated_reason` is the model's own reasoning (thinking) if it exposed any
-    — testimony, not proof. `evidence_refs` point at the retrieval, the rerank,
+    `stated_reason` is the model's own words — its thinking during generation
+    if it exposed any, otherwise a post-hoc self-explanation (clearly flagged).
+    Testimony, not proof. `evidence_refs` point at the retrieval, the rerank,
     and the LLM call so the report shows what the agent saw vs what it said.
     A tool_call this turn means the agent acted, not just answered.
     """
-    llm_event = rec.last("llm_call")
-    llm_seq = llm_event["seq"] if llm_event else None
-    reasoning = (llm_event or {}).get("payload", {}).get("reasoning") if llm_event else None
     tool_event = rec.last("tool_call")
     top_doc = used_chunks[0]["doc_id"] if used_chunks else "none"
 
@@ -370,17 +429,21 @@ def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq):
     else:
         choice = f"answered_from_document:{top_doc}"
 
-    # Alternatives = the other documents it could have leaned on, plus the
-    # two default fallbacks every support turn has.
     alternatives = [f"use_document:{c['doc_id']}" for c in all_chunks
                     if c["doc_id"] != top_doc]
     alternatives += ["ask_clarifying_question", "escalate_to_human"]
 
-    stated_reason = reasoning or (
-        "The model did not expose explicit reasoning for this answer. Compare "
-        "the response against the retrieved evidence on the right to judge "
-        "whether it used the correct (most recent) document."
-    )
+    if reasoning and reason_source == "posthoc":
+        stated_reason = ("[post-hoc self-explanation — the agent was asked why "
+                         "AFTER answering, so treat it as testimony] " + reasoning)
+    elif reasoning:
+        stated_reason = reasoning
+    else:
+        stated_reason = (
+            "The model exposed no reasoning and no self-explanation was "
+            "available. Compare the response against the retrieved evidence on "
+            "the right to judge whether it used the correct (most recent) document."
+        )
     evidence_refs = [s for s in (retrieval_seq, rerank_seq, llm_seq) if s is not None]
     rec.decision(choice=choice, alternatives=alternatives,
                  stated_reason=stated_reason, evidence_refs=evidence_refs)
@@ -426,9 +489,21 @@ def ask(question: str, model_id: str = "gemini-3.5-flash",
             else:  # openai / openrouter share the OpenAI-compatible path
                 answer = _ask_openai_compat(client, model, context, question)
 
+            # The stated reason is the model's own words: its thinking if it
+            # exposed any, else a short post-hoc self-explanation.
+            main_llm = rec.last("llm_call")
+            llm_seq = main_llm["seq"] if main_llm else None
+            reasoning = (main_llm or {}).get("payload", {}).get("reasoning")
+            reason_source = "thinking"
+            if not reasoning:
+                reasoning = _self_explain(provider, model, context, question,
+                                          answer, rec)
+                reason_source = "posthoc"
+
             # Record the decision so the report shows the agent's stated reason
             # side-by-side with ALL the evidence it had (used and ignored).
-            _record_decision(rec, all_chunks, chunks, retrieval_seq, rerank_seq)
+            _record_decision(rec, all_chunks, chunks, retrieval_seq, rerank_seq,
+                             llm_seq, reasoning, reason_source)
 
             rec.final_output(answer)
             return answer, session_id

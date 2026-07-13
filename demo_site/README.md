@@ -57,8 +57,19 @@ and the LLM call as `evidence_refs`, every real session's report is as rich
 as `blackbox demo`: a **Retrieval & reranking** section (keyword vs. relevance
 scores), the **Model reasoning (CVR)**, and a **Decision analysis** panel that
 puts the model's stated reason next to *all* the evidence it had — including
-the documents it ignored. The model's own thinking becomes the stated reason,
-so you can see whether it leaned on the correct (most recent) policy.
+the documents it ignored.
+
+**The stated reason is always the model's own words:**
+
+- **Thinking models** — Gemini (asked with `thinking_level="high"`, so even
+  flash-lite returns a full thought summary) and Anthropic (adaptive thinking)
+  expose their reasoning directly; it becomes the stated reason.
+- **Non-thinking models** — OpenAI and most OpenRouter models expose no
+  thinking, so the agent makes one short follow-up call asking the model which
+  document it used and why. That `self_explanation` is recorded as its own
+  event and shown as the stated reason, clearly flagged as *post-hoc
+  testimony* (a self-explanation given after the fact may not reflect the real
+  decision — the report says so).
 
 Recordings live in `demo_site/recordings/`:
 

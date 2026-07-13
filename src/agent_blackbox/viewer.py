@@ -400,6 +400,7 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
     type_class = {
         "user_input": "t-in", "final_output": "t-out", "decision": "t-dec",
         "llm_call": "t-llm", "retrieval": "t-ret", "rerank": "t-ret",
+        "self_explanation": "t-llm",
         "tool_call": "t-tool", "error": "t-err", "annotation": "t-flag",
     }
     rows = ""

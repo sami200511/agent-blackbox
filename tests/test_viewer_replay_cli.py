@@ -90,6 +90,39 @@ def test_report_shows_retrieval_rerank_and_decision(tmp_path):
     assert html_doc.count("relevance 0.91") >= 2
 
 
+def test_report_posthoc_self_explanation(tmp_path):
+    """A non-thinking model's stated reason comes from a self-explanation and
+    must render, clearly flagged as post-hoc, with the event in the timeline."""
+    bb = BlackBox(directory=str(tmp_path))
+    with bb.session(session_id="se-1", pilot="web-agent") as rec:
+        rec.user_input("do you ship to the UK?")
+        r_seq = rec.retrieval("shipping", chunks=[
+            {"doc_id": "shipping.md", "source": "docs/ship", "score": 0.9,
+             "text": "We ship to the UK in 3-5 days."}])
+        l_seq = rec.llm_call(model="openai/gpt-4o-mini", provider="openrouter",
+                             prompt="...", response="Yes, 3-5 days.", reasoning=None)
+        rec.custom("self_explanation", {
+            "provider": "openrouter", "model": "openai/gpt-4o-mini",
+            "asked": "which document did you rely on, and why?",
+            "response": "I relied on shipping.md because it lists UK delivery times."})
+        rec.decision(
+            choice="answered_from_document:shipping.md",
+            alternatives=["escalate_to_human"],
+            stated_reason="[post-hoc self-explanation — the agent was asked why "
+                          "AFTER answering, so treat it as testimony] I relied on "
+                          "shipping.md because it lists UK delivery times.",
+            evidence_refs=[r_seq, l_seq])
+        rec.final_output("Yes, 3-5 days.")
+
+    html_doc = build_report(bb.load("se-1"))
+    assert "post-hoc self-explanation" in html_doc
+    assert "I relied on shipping.md" in html_doc
+    assert "self_explanation" in html_doc  # event visible in the timeline
+    assert "No decision events recorded." not in html_doc
+    ok, _ = bb.verify("se-1")
+    assert ok
+
+
 def test_report_rerank_failure_shown(tmp_path):
     bb = BlackBox(directory=str(tmp_path))
     with bb.session(session_id="rich-2") as rec:
