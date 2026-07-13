@@ -78,7 +78,7 @@ def test_report_shows_retrieval_rerank_and_decision(tmp_path):
     html_doc = build_report(bb.load("rich-1"))
     # dedicated retrieval/rerank section
     assert "Retrieval &amp; reranking" in html_doc
-    assert "keyword 1.14" in html_doc
+    assert "score 1.14" in html_doc
     assert "RERANK" in html_doc and "relevance 0.91" in html_doc
     # model reasoning (CVR) present
     assert "Model reasoning" in html_doc

@@ -23,10 +23,10 @@ import httpx
 from agent_blackbox import (
     BlackBox,
     attribute,
-    bm25,
     condense_reason,
     load_env_file,
     make_client,
+    rank,
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -232,15 +232,11 @@ DOCUMENTS = _load_documents()
 
 
 def retrieve(question: str, top_k: int = 5) -> list:
-    """Retrieve documents by BM25 relevance — a principled score that weights
-    rare, discriminating terms, instead of naive term-frequency counting (which
-    tied documents that share vocabulary). Swap for your vector store in a real
-    system."""
-    scores = bm25(question, [d["text"] for d in DOCUMENTS])
-    ranked = sorted(
-        ({**d, "score": s} for d, s in zip(DOCUMENTS, scores) if s > 0),
-        key=lambda d: d["score"], reverse=True,
-    )
+    """Retrieve documents by BM25 relevance ADJUSTED for freshness/status, so a
+    current policy outranks a superseded one that ties it on pure relevance
+    (the superseded doc is marked 'SUPERSEDED', the current one 'effective ...
+    replaces all earlier'). Swap for your vector store in a real system."""
+    ranked = [d for d in rank(question, DOCUMENTS) if d["bm25"] > 0]
     return ranked[:top_k]
 
 

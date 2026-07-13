@@ -1,4 +1,4 @@
-from agent_blackbox import attribute, bm25, grounding_scores
+from agent_blackbox import attribute, bm25, freshness, grounding_scores, rank
 from agent_blackbox.retrieval import distinctive_terms, tokenize
 
 OLD = ("Refund Policy 2023 STATUS SUPERSEDED. Customers may request a full "
@@ -82,6 +82,34 @@ def test_endorsed_document_is_used_even_if_grounding_low():
     statuses, _ = attribute(answer, DOCS, cue_text=reasoning)
     by_id = {s["doc_id"]: s for s in statuses}
     assert by_id["faq.md"]["status"] == "used"            # endorsed via "confirms"
+
+
+def test_freshness_down_weights_superseded_lifts_current():
+    old_mult, old_year, old_notes = freshness(OLD)
+    cur_mult, cur_year, cur_notes = freshness(CURRENT)
+    assert old_mult < 1.0 and cur_mult > 1.0
+    assert old_year == 2023 and cur_year == 2026
+    assert any("superseded" in n for n in old_notes)
+    assert any("current" in n for n in cur_notes)
+
+
+def test_rank_puts_current_policy_above_superseded():
+    query = "can I get a refund for my laptop"
+    ranked = {d["doc_id"]: d for d in rank(query, DOCS)}
+    cur = ranked["refund-current.md"]
+    old = ranked["refund-OLD.md"]
+    # they tie on pure relevance...
+    assert abs(cur["bm25"] - old["bm25"]) < 0.5
+    # ...but the current policy wins on the freshness-adjusted score
+    assert cur["score"] > old["score"]
+    assert cur["freshness"] > old["freshness"]
+
+
+def test_rank_preserves_docs_without_status_markers():
+    ranked = rank("shipping to the UK", DOCS)
+    ship = next(d for d in ranked if d["doc_id"] == "shipping.md")
+    assert ship["freshness"] == 1.0        # no markers → neutral
+    assert ship["score"] == ship["bm25"]
 
 
 def test_tokenize_drops_stopwords():

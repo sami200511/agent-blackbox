@@ -396,11 +396,23 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
         p = e["payload"]
         rows_r = ""
         for c in p.get("chunks", []):
+            # Show the freshness/status breakdown when present, so a current
+            # policy outranking a superseded twin is explained, not magic.
+            breakdown = ""
+            if c.get("bm25") is not None and c.get("freshness") is not None:
+                notes = c.get("freshness_notes") or []
+                breakdown = (
+                    f"<div class='chunk-src mono' style='color:var(--dim)'>"
+                    f"bm25 {esc(c.get('bm25'))} × freshness {esc(c.get('freshness'))}"
+                    + (f" · {esc(' · '.join(notes))}" if notes else "")
+                    + "</div>"
+                )
             rows_r += (
                 f"<div class='chunk'><div class='chunk-head'>"
                 f"<span class='mono'>{esc(c.get('doc_id'))}</span>"
-                f"<span class='score'>keyword {esc(c.get('score'))}</span></div>"
+                f"<span class='score'>score {esc(c.get('score'))}</span></div>"
                 f"<div class='chunk-src mono'>{esc(c.get('source'))}</div>"
+                f"{breakdown}"
                 f"<p>{esc(c.get('text'))}</p></div>"
             )
         retrieval_html += (

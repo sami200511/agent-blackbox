@@ -71,6 +71,76 @@ def bm25(query: str, doc_texts: list, k1: float = 1.5, b: float = 0.75) -> list:
     return scores
 
 
+# Markers that a document is retired/archived (down-weight it) or the one in
+# force (up-weight it). Relevance alone can't tell a current policy from a
+# superseded one that shares its vocabulary — but the documents say which is which.
+_SUPERSEDED_MARKERS = (
+    "superseded", "kept for archive", "archived", "deprecated", "outdated",
+    "no longer in effect", "no longer valid", "old edition", "replaced by",
+    "previous version", "do not use",
+)
+_CURRENT_MARKERS = (
+    "effective", "current policy", "this policy replaces", "replaces all",
+    "most recent", "now in effect", "in force",
+)
+_SUPERSEDED_MULT = 0.4      # retired docs drop well below live ones
+_CURRENT_MULT = 1.15        # docs marked in-force get a small lift
+_RECENCY_LIFT = 0.15        # newest effective year gets up to +15%
+
+
+def freshness(text: str) -> tuple:
+    """Status signal for a document: (multiplier, effective_year, notes).
+
+    A superseded/archived doc is strongly down-weighted; a doc marked
+    current/effective is lifted. `effective_year` is the latest year the text
+    mentions, used for recency ranking across the set.
+    """
+    low = (text or "").lower()
+    mult = 1.0
+    notes = []
+    if any(m in low for m in _SUPERSEDED_MARKERS):
+        mult *= _SUPERSEDED_MULT
+        notes.append("superseded/archived — down-weighted")
+    if any(m in low for m in _CURRENT_MARKERS):
+        mult *= _CURRENT_MULT
+        notes.append("marked current/effective — up-weighted")
+    years = [int(y) for y in re.findall(r"\b(?:19|20)\d{2}\b", low)]
+    return mult, (max(years) if years else None), notes
+
+
+def rank(query: str, docs: list) -> list:
+    """Rank documents by BM25 relevance ADJUSTED for freshness/status.
+
+    `docs` is a list of dicts with at least "text". Returns them sorted by the
+    combined score (highest first), each annotated with `score` (final),
+    `bm25`, `freshness` (the multiplier applied), `freshness_notes`, and
+    `effective_year`. This makes a current policy outrank a superseded twin
+    that ties it on pure relevance.
+    """
+    texts = [d.get("text", "") for d in docs]
+    bm = bm25(query, texts)
+    fresh = [freshness(t) for t in texts]
+    years = [y for _, y, _ in fresh if y]
+    ymin, ymax = (min(years), max(years)) if years else (0, 0)
+
+    out = []
+    for d, b, (mult, year, notes) in zip(docs, bm, fresh):
+        recency = 1.0
+        if year and ymax > ymin:
+            recency = 1.0 + _RECENCY_LIFT * (year - ymin) / (ymax - ymin)
+        factor = mult * recency
+        out.append({
+            **d,
+            "score": round(b * factor, 3),
+            "bm25": round(b, 3),
+            "freshness": round(factor, 3),
+            "freshness_notes": notes,
+            "effective_year": year,
+        })
+    out.sort(key=lambda d: d["score"], reverse=True)
+    return out
+
+
 def distinctive_terms(doc_texts: list, top: int = 20) -> list:
     """Per-document set of its most distinctive (high TF-IDF) terms."""
     docs_tokens = [tokenize(d) for d in doc_texts]
