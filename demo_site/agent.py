@@ -21,7 +21,13 @@ import re
 
 import httpx
 
-from agent_blackbox import BlackBox, condense_reason, load_env_file, make_client
+from agent_blackbox import (
+    BlackBox,
+    condense_reason,
+    documents_referenced,
+    load_env_file,
+    make_client,
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(BASE_DIR, "documents")
@@ -412,25 +418,39 @@ def _self_explain(provider, model, context, question, answer, rec):
 
 
 def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq,
-                     llm_seq, stated_reason):
+                     llm_seq, stated_reason, used_docs, ignored_docs):
     """Build a decision event from what actually happened this turn.
 
+    `choice` reflects the document(s) the MODEL actually relied on (read from
+    its own words), not merely the top-ranked chunk — so a model that correctly
+    discards a higher-ranked but outdated document is credited for it.
     `stated_reason` is a SHORT version of the model's own why (testimony, not
     proof); the full reasoning lives in the model-calls section. `evidence_refs`
-    point at the retrieval, the rerank, and the LLM call so the report shows
-    what the agent saw vs what it said. A tool_call this turn means the agent
-    acted, not just answered.
+    point at the retrieval, the rerank, and the LLM call.
     """
     tool_event = rec.last("tool_call")
-    top_doc = used_chunks[0]["doc_id"] if used_chunks else "none"
+    # Prefer what the model said it used; fall back to the top-ranked chunk.
+    primary = (used_docs[0] if used_docs
+               else (used_chunks[0]["doc_id"] if used_chunks else "none"))
 
     if tool_event is not None:
-        choice = f"used_tool:{tool_event['payload'].get('name')} (grounded on {top_doc})"
+        choice = f"used_tool:{tool_event['payload'].get('name')} (grounded on {primary})"
+    elif used_docs:
+        extra = f" (+{len(used_docs) - 1} more)" if len(used_docs) > 1 else ""
+        choice = f"answered_from_document:{primary}{extra}"
     else:
-        choice = f"answered_from_document:{top_doc}"
+        # No document was clearly cited — say so instead of guessing.
+        choice = f"answered (top-ranked doc was {primary}; model did not cite a source)"
 
-    alternatives = [f"use_document:{c['doc_id']}" for c in all_chunks
-                    if c["doc_id"] != top_doc]
+    alternatives = []
+    for c in all_chunks:
+        did = c["doc_id"]
+        if did in used_docs:
+            continue
+        label = f"use_document:{did}"
+        if did in ignored_docs:
+            label += " — model explicitly IGNORED this (retrieval ranked it, model discarded it)"
+        alternatives.append(label)
     alternatives += ["ask_clarifying_question", "escalate_to_human"]
 
     evidence_refs = [s for s in (retrieval_seq, rerank_seq, llm_seq) if s is not None]
@@ -484,25 +504,32 @@ def ask(question: str, model_id: str = "gemini-3.5-flash",
             main_llm = rec.last("llm_call")
             llm_seq = main_llm["seq"] if main_llm else None
             reasoning = (main_llm or {}).get("payload", {}).get("reasoning")
+            explanation = ""
             if reasoning:
                 stated_reason = condense_reason(reasoning)
             else:
-                explained = _self_explain(provider, model, context, question,
-                                          answer, rec)
-                if explained:
+                explanation = _self_explain(provider, model, context, question,
+                                            answer, rec) or ""
+                if explanation:
                     stated_reason = ("[post-hoc self-explanation — the agent was "
                                      "asked why AFTER answering] "
-                                     + condense_reason(explained, max_chars=200))
+                                     + condense_reason(explanation, max_chars=200))
                 else:
                     stated_reason = (
                         "The model exposed no reasoning and no self-explanation "
                         "was available. Compare the response against the "
                         "retrieved evidence on the right.")
 
-            # Record the decision so the report shows the agent's stated reason
-            # side-by-side with ALL the evidence it had (used and ignored).
+            # Which documents did the model ACTUALLY use vs. ignore? Read it from
+            # the model's own words (reasoning / self-explanation / answer), not
+            # from the retrieval ranking — a tied or mis-ranked outdated doc must
+            # not be reported as the source when the model discarded it.
+            grounding = " ".join(filter(None, [reasoning, explanation, answer]))
+            doc_ids = [c["doc_id"] for c in all_chunks]
+            used_docs, ignored_docs = documents_referenced(grounding, doc_ids)
+
             _record_decision(rec, all_chunks, chunks, retrieval_seq, rerank_seq,
-                             llm_seq, stated_reason)
+                             llm_seq, stated_reason, used_docs, ignored_docs)
 
             rec.final_output(answer)
             return answer, session_id
