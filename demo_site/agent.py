@@ -21,7 +21,7 @@ import re
 
 import httpx
 
-from agent_blackbox import BlackBox, load_env_file, make_client
+from agent_blackbox import BlackBox, condense_reason, load_env_file, make_client
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOCS_DIR = os.path.join(BASE_DIR, "documents")
@@ -374,8 +374,8 @@ def _self_explain(provider, model, context, question, answer, rec):
     """
     prompt = (
         "You just answered a customer support question using the documents "
-        "below. In 1-2 sentences, state which specific document you based your "
-        "answer on and why. Name the document.\n\n"
+        "below. In ONE short sentence, state which specific document you based "
+        "your answer on and why. Name the document.\n\n"
         f"Documents:\n{context}\n\nQuestion: {question}\n\nYour answer: {answer}\n\n"
         "Which document did you rely on, and why?"
     )
@@ -412,14 +412,14 @@ def _self_explain(provider, model, context, question, answer, rec):
 
 
 def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq,
-                     llm_seq, reasoning, reason_source):
+                     llm_seq, stated_reason):
     """Build a decision event from what actually happened this turn.
 
-    `stated_reason` is the model's own words — its thinking during generation
-    if it exposed any, otherwise a post-hoc self-explanation (clearly flagged).
-    Testimony, not proof. `evidence_refs` point at the retrieval, the rerank,
-    and the LLM call so the report shows what the agent saw vs what it said.
-    A tool_call this turn means the agent acted, not just answered.
+    `stated_reason` is a SHORT version of the model's own why (testimony, not
+    proof); the full reasoning lives in the model-calls section. `evidence_refs`
+    point at the retrieval, the rerank, and the LLM call so the report shows
+    what the agent saw vs what it said. A tool_call this turn means the agent
+    acted, not just answered.
     """
     tool_event = rec.last("tool_call")
     top_doc = used_chunks[0]["doc_id"] if used_chunks else "none"
@@ -433,17 +433,6 @@ def _record_decision(rec, all_chunks, used_chunks, retrieval_seq, rerank_seq,
                     if c["doc_id"] != top_doc]
     alternatives += ["ask_clarifying_question", "escalate_to_human"]
 
-    if reasoning and reason_source == "posthoc":
-        stated_reason = ("[post-hoc self-explanation — the agent was asked why "
-                         "AFTER answering, so treat it as testimony] " + reasoning)
-    elif reasoning:
-        stated_reason = reasoning
-    else:
-        stated_reason = (
-            "The model exposed no reasoning and no self-explanation was "
-            "available. Compare the response against the retrieved evidence on "
-            "the right to judge whether it used the correct (most recent) document."
-        )
     evidence_refs = [s for s in (retrieval_seq, rerank_seq, llm_seq) if s is not None]
     rec.decision(choice=choice, alternatives=alternatives,
                  stated_reason=stated_reason, evidence_refs=evidence_refs)
@@ -489,21 +478,31 @@ def ask(question: str, model_id: str = "gemini-3.5-flash",
             else:  # openai / openrouter share the OpenAI-compatible path
                 answer = _ask_openai_compat(client, model, context, question)
 
-            # The stated reason is the model's own words: its thinking if it
-            # exposed any, else a short post-hoc self-explanation.
+            # The stated reason is a SHORT version of the model's own why: a
+            # condensed line of its thinking if it exposed any, else a short
+            # post-hoc self-explanation. The FULL reasoning stays in the CVR.
             main_llm = rec.last("llm_call")
             llm_seq = main_llm["seq"] if main_llm else None
             reasoning = (main_llm or {}).get("payload", {}).get("reasoning")
-            reason_source = "thinking"
-            if not reasoning:
-                reasoning = _self_explain(provider, model, context, question,
+            if reasoning:
+                stated_reason = condense_reason(reasoning)
+            else:
+                explained = _self_explain(provider, model, context, question,
                                           answer, rec)
-                reason_source = "posthoc"
+                if explained:
+                    stated_reason = ("[post-hoc self-explanation — the agent was "
+                                     "asked why AFTER answering] "
+                                     + condense_reason(explained, max_chars=200))
+                else:
+                    stated_reason = (
+                        "The model exposed no reasoning and no self-explanation "
+                        "was available. Compare the response against the "
+                        "retrieved evidence on the right.")
 
             # Record the decision so the report shows the agent's stated reason
             # side-by-side with ALL the evidence it had (used and ignored).
             _record_decision(rec, all_chunks, chunks, retrieval_seq, rerank_seq,
-                             llm_seq, reasoning, reason_source)
+                             llm_seq, stated_reason)
 
             rec.final_output(answer)
             return answer, session_id

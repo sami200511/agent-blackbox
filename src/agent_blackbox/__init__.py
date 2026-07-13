@@ -26,6 +26,7 @@ from .core import (
 )
 from .redact import default_redactor, make_redactor
 from .replay import AblationResult, CounterfactualReplay
+from .summarize import condense_reason
 from .storage import JsonlStore, SessionInfo, SqliteStore, open_store
 
 __version__ = "0.1.0"
@@ -44,6 +45,7 @@ __all__ = [
     "open_store",
     "CounterfactualReplay",
     "AblationResult",
+    "condense_reason",
     "make_redactor",
     "default_redactor",
     "load_env_file",
