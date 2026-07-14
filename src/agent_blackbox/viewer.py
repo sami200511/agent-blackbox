@@ -109,6 +109,15 @@ _CSS = """
   .chunk-head .score { color:var(--amber); font-family:var(--mono); }
   .chunk-src { font-size:11px; color:var(--dim); margin:2px 0 4px; }
   .chunk p { margin:4px 0 0; font-size:14px; }
+  .doctext.long p { max-height:6.5em; overflow:hidden;
+    -webkit-mask-image:linear-gradient(180deg,#000 55%%,transparent);
+            mask-image:linear-gradient(180deg,#000 55%%,transparent); }
+  .doctext.long.open p { max-height:none;
+    -webkit-mask-image:none; mask-image:none; }
+  .readmore { background:none; border:0; cursor:pointer; color:var(--amber);
+    font-family:var(--mono); font-size:12px; letter-spacing:.04em;
+    padding:6px 0 0; margin:0; }
+  .readmore:hover { text-decoration:underline; }
   .investigator-note { margin:14px 0 0; font-size:12.5px; color:var(--dim);
                         border-top:1px solid var(--line); padding-top:10px; }
 
@@ -153,6 +162,19 @@ def esc(s) -> str:
     if not isinstance(s, str):
         s = json.dumps(s, ensure_ascii=False, indent=2)
     return html.escape(s)
+
+
+def _doc_text(text, limit: int = 260) -> str:
+    """Render a retrieved document's text. Long content is collapsed behind a
+    'Read more' toggle so a single long document doesn't take over the report;
+    short content is rendered as-is."""
+    t = text or ""
+    body = f"<p>{esc(t)}</p>"
+    if len(t) <= limit:
+        return body
+    return (f"<div class='doctext long'>{body}"
+            f"<button class='readmore' onclick='toggleMore(this)'>Read more</button>"
+            f"</div>")
 
 
 def _rerank_label(ev: dict) -> str:
@@ -225,6 +247,11 @@ def _page(title: str, header_right: str, body: str) -> str:
   <div class="wrap">
 {body}
   </div>
+  <script>
+  function toggleMore(b){{var d=b.parentNode;
+    var open=d.classList.toggle('open');
+    b.textContent=open?'Show less':'Read more';}}
+  </script>
 </body>
 </html>"""
 
@@ -310,7 +337,7 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
                         f"<span class='mono'>{esc(c.get('doc_id'))}</span>"
                         f"<span class='score'>score {esc(c.get('score'))}</span></div>"
                         f"<div class='chunk-src mono'>{esc(c.get('source'))}</div>"
-                        f"<p>{esc(c.get('text'))}</p></div>"
+                        f"{_doc_text(c.get('text'))}</div>"
                     )
                 ev_blocks += (
                     f"<div class='evidence'><div class='ev-label'>SEQ {ref} · RETRIEVAL "
@@ -413,7 +440,7 @@ def build_report(events: list[dict], verify_result: Optional[tuple] = None) -> s
                 f"<span class='score'>score {esc(c.get('score'))}</span></div>"
                 f"<div class='chunk-src mono'>{esc(c.get('source'))}</div>"
                 f"{breakdown}"
-                f"<p>{esc(c.get('text'))}</p></div>"
+                f"{_doc_text(c.get('text'))}</div>"
             )
         retrieval_html += (
             f"<div class='evidence'><div class='ev-label'>SEQ {e['seq']} · RETRIEVAL "
