@@ -33,6 +33,10 @@ blackbox = "agent_blackbox.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Report CSS/JS live as files next to the package and are inlined at render time.
+[tool.setuptools.package-data]
+agent_blackbox = ["assets/*.css", "assets/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
