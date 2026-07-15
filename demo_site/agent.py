@@ -17,6 +17,7 @@ breaks when PEP 563 turns them into strings.
 
 import json
 import os
+import threading
 
 import httpx
 
@@ -24,6 +25,7 @@ from agent_blackbox import (
     BlackBox,
     attribute,
     condense_reason,
+    load_database,
     load_documents,
     load_env_file,
     make_client,
@@ -219,12 +221,26 @@ ANTHROPIC_TOOLS = [
 
 
 # -------------------------------------------------------------- retrieval ---
-def _load_documents() -> list:
+# Optional: point the agent at a LIVE database too. Set DATABASE_URL in the
+# environment / .env (e.g. postgresql://ro_user@host/shop or sqlite:///shop.db)
+# and every table is merged into the knowledge base alongside documents/.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DATABASE_SCHEMA = os.environ.get("DATABASE_SCHEMA", "").strip() or None
+
+# The knowledge base is reloaded WHENEVER documents/ changes — no server
+# restart needed. We fingerprint the folder (paths + mtimes + sizes) on each
+# question and only re-ingest when that fingerprint actually changes, so an
+# unchanged folder costs one cheap os.stat sweep, not a full re-parse.
+_kb = {"sig": None, "docs": [], "db_docs": None}
+_kb_lock = threading.Lock()
+
+
+def _load_file_documents() -> list:
     """Ingest every file under documents/ as searchable knowledge.
 
     Not just .md/.txt: drop in a CSV, an Excel workbook, a SQLite database, a
-    SQL dump, JSON, XML/HTML or a Word file and it becomes retrievable too — a
-    workbook/database contributes one document per sheet/table. See
+    SQL/pg_dump file, JSON, XML/HTML or a Word file and it becomes retrievable
+    too — a workbook/database contributes one document per sheet/table. See
     agent_blackbox.ingest for the full list.
     """
     docs = load_documents(DOCS_DIR)
@@ -233,15 +249,68 @@ def _load_documents() -> list:
     return docs
 
 
-DOCUMENTS = _load_documents()
+def _load_db_documents() -> list:
+    """Tables from a live database (if DATABASE_URL is set), cached after the
+    first successful load. A bad/unreachable DB never breaks the site — it is
+    logged and simply contributes no documents."""
+    if not DATABASE_URL:
+        return []
+    if _kb["db_docs"] is None:
+        try:
+            _kb["db_docs"] = load_database(DATABASE_URL, schema=DATABASE_SCHEMA,
+                                           label="database")
+        except Exception as exc:         # driver missing, DB down, bad URL, ...
+            print(f"site: DATABASE_URL ingest failed ({exc}); "
+                  f"continuing with documents/ only")
+            _kb["db_docs"] = []
+    return _kb["db_docs"]
+
+
+def _folder_signature() -> tuple:
+    """A cheap fingerprint of documents/: (relpath, mtime, size) per file."""
+    sig = []
+    for root, dirs, files in os.walk(DOCS_DIR):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in files:
+            if name.startswith("."):
+                continue
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            sig.append((os.path.relpath(path, DOCS_DIR), int(st.st_mtime), st.st_size))
+    return tuple(sorted(sig))
+
+
+def get_documents() -> list:
+    """The current knowledge base, re-ingesting documents/ only when it changed.
+
+    This is what makes newly added/edited files show up on the very next
+    question with no restart. The live-database tables (if any) are merged in.
+    """
+    with _kb_lock:
+        sig = _folder_signature()
+        if sig != _kb["sig"]:
+            _kb["docs"] = _load_file_documents()
+            _kb["sig"] = sig
+        return _kb["docs"] + _load_db_documents()
+
+
+# Warm the cache at import so the first question is fast (and so `DOCUMENTS`
+# stays available for anything that imported it before).
+DOCUMENTS = get_documents()
 
 
 def retrieve(question: str, top_k: int = 5) -> list:
     """Retrieve documents by BM25 relevance ADJUSTED for freshness/status, so a
     current policy outranks a superseded one that ties it on pure relevance
     (the superseded doc is marked 'SUPERSEDED', the current one 'effective ...
-    replaces all earlier'). Swap for your vector store in a real system."""
-    ranked = [d for d in rank(question, DOCUMENTS) if d["bm25"] > 0]
+    replaces all earlier'). Swap for your vector store in a real system.
+
+    Reads the LIVE knowledge base via get_documents(), so files added to
+    documents/ while the server is running are picked up automatically."""
+    ranked = [d for d in rank(question, get_documents()) if d["bm25"] > 0]
     return ranked[:top_k]
 
 
