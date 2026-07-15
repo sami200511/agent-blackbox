@@ -24,6 +24,14 @@ dependencies = []
 openai = ["openai>=1.30"]          # also covers OpenRouter (OpenAI-compatible)
 anthropic = ["anthropic>=0.30"]
 gemini = ["google-genai>=1.0"]
+# File ingestion (CSV, Excel .xlsx, SQLite, SQL/pg_dump, JSON, XML/HTML, Word
+# .docx) is pure stdlib and needs NOTHING here. These extras only add sources
+# that genuinely require a driver/parser: .pdf, legacy .xls, and LIVE
+# PostgreSQL/MySQL databases (load_database — SQLite needs no extra).
+pdf = ["pypdf>=4"]
+xls = ["xlrd>=2"]
+postgres = ["psycopg[binary]>=3"]
+mysql = ["pymysql>=1"]
 dev = ["pytest>=8", "httpx>=0.27", "openai>=1.30", "anthropic>=0.30",
        "google-genai>=1.0"]
 

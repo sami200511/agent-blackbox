@@ -24,6 +24,7 @@ from agent_blackbox import (
     BlackBox,
     attribute,
     condense_reason,
+    load_documents,
     load_env_file,
     make_client,
     rank,
@@ -219,12 +220,16 @@ ANTHROPIC_TOOLS = [
 
 # -------------------------------------------------------------- retrieval ---
 def _load_documents() -> list:
-    docs = []
-    for name in sorted(os.listdir(DOCS_DIR)):
-        if name.endswith((".md", ".txt")):
-            with open(os.path.join(DOCS_DIR, name), encoding="utf-8") as f:
-                docs.append({"doc_id": name, "source": f"documents/{name}",
-                             "text": f.read()})
+    """Ingest every file under documents/ as searchable knowledge.
+
+    Not just .md/.txt: drop in a CSV, an Excel workbook, a SQLite database, a
+    SQL dump, JSON, XML/HTML or a Word file and it becomes retrievable too — a
+    workbook/database contributes one document per sheet/table. See
+    agent_blackbox.ingest for the full list.
+    """
+    docs = load_documents(DOCS_DIR)
+    for d in docs:                       # keep the report's paths under documents/
+        d["source"] = f"documents/{d['source']}"
     return docs
 
 

@@ -102,6 +102,66 @@ Notes:
 
   Anything else: call the `FlightRecorder` methods directly — same events.
 
+## Loading data files as the agent's knowledge
+
+Your agent's "knowledge" is just a list of `{"doc_id", "source", "text"}`
+documents fed to the retriever. `load_documents` builds that list from a folder
+of **whatever files you drop in** — not only Markdown/text, but spreadsheets,
+CSV exports, databases and SQL dumps:
+
+```python
+from agent_blackbox import load_documents, rank
+
+docs = load_documents("knowledge/")          # one mixed folder, any of the below
+hits = rank("refunds over $50", docs)        # BM25 + freshness, ready to retrieve
+```
+
+Handled with **zero extra dependencies** (pure stdlib, like the recorder core):
+
+| Files | How it's turned into searchable text |
+|---|---|
+| `.csv` `.tsv` | one labelled `column: value` line per row |
+| `.xlsx` | every sheet, every row — the OOXML zip is unpacked with stdlib, no openpyxl |
+| `.sqlite` `.db` `.sqlite3` | every table dumped to labelled rows (one document per table) |
+| `.sql` `.pgsql` (incl. **`pg_dump`**) | replayed into a temp DB where possible; Postgres `COPY … FROM stdin` blocks parsed into tables; raw script kept too |
+| `.json` `.jsonl` `.ndjson` | records flattened to `key: value` lines (a list of records → a table) |
+| `.xml` `.html` `.htm` | tags stripped to readable text |
+| `.docx` | document body text (stdlib zip + XML) |
+| `.txt` `.md` `.rst` `.log`, config (`.yaml` `.ini` `.toml` …) | read as-is |
+
+A workbook or database becomes **one document per sheet/table**, with a
+`doc_id` like `sales.xlsx#Summary` or `shop.db#warranty`, so an investigation
+can point at the exact tab or table an answer came from. Two formats need a
+parser and are enabled by an optional extra: `.pdf` (`pip install
+agent-blackbox[pdf]`) and legacy binary `.xls` (`[xls]`).
+
+### Live databases (PostgreSQL, MySQL, SQLite)
+
+A running database is knowledge too — `load_database` reflects its tables and
+renders their rows, one document per table:
+
+```python
+from agent_blackbox import load_database, rank
+
+# a connection URL (imports the driver)…
+docs = load_database("postgresql://ro_user@db.internal/shop", schema="public")
+
+# …or bring your own DB-API connection, and the core stays dependency-free:
+import psycopg
+docs = load_database(psycopg.connect(dsn), tables=["orders", "refunds"])
+
+hits = rank("orders refunded over $50 last week", docs)   # doc_id: shop#public.orders
+```
+
+It speaks DB-API 2.0, so any driver works. SQLite needs nothing; PostgreSQL
+uses `pip install agent-blackbox[postgres]` (psycopg), MySQL `[mysql]`
+(pymysql). Point it at a **read-only** account — it only ever `SELECT`s, but
+least-privilege is the right default for anything an agent can see.
+
+In the demo site this is already wired in: drop any of these files into
+`demo_site/documents/` and it becomes retrievable knowledge for the agent —
+recorded, ranked and attributed exactly like the Markdown policies.
+
 ## Investigating an incident
 
 ```bash

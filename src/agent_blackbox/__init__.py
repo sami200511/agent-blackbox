@@ -18,6 +18,14 @@ Then investigate:  `blackbox list`, `blackbox report <session>`, `blackbox serve
 from .clients import load_env_file, make_client, watched_client
 from .attribution import classify_references, documents_referenced
 from .context import BlackBox, current_recorder
+from .ingest import (
+    OPTIONAL_EXTENSIONS,
+    SUPPORTED_EXTENSIONS,
+    IngestError,
+    load_database,
+    load_documents,
+    load_file,
+)
 from .core import (
     GENESIS_HASH,
     FlightRecorder,
@@ -55,6 +63,12 @@ __all__ = [
     "rank",
     "freshness",
     "grounding_scores",
+    "load_documents",
+    "load_file",
+    "load_database",
+    "IngestError",
+    "SUPPORTED_EXTENSIONS",
+    "OPTIONAL_EXTENSIONS",
     "make_redactor",
     "default_redactor",
     "load_env_file",
